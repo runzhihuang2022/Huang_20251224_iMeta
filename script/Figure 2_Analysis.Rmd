@@ -1,0 +1,350 @@
+---
+title: "Figure 2 Generation Code - Huang_20251224_iMeta"
+author: "Huang R et al."
+date: "2025-12-24"
+output: html_document
+journal: "iMeta"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(scales)
+library(RColorBrewer)
+library(purrr)
+library(grid)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(cowplot)
+library(tibble)
+library(showtext)
+
+# Set global theme
+theme_set(theme_bw(base_size = 12, base_family = "sans"))
+
+# Optional: Enable Arial font if available
+# font_add("Arial", "arial.ttf")
+# showtext_auto()
+
+```
+
+## Description
+This script generates Figure 2 for the manuscript, illustrating the recruitment progress and baseline characteristics of the BIOME cohort. (Note: Figure 1 is a schematic diagram and does not involve code generation.)
+
+```{r}
+# Define input filenames
+patient_file <- "20250922patients_translated_full.csv"
+sampling_file <- "combined_sampling_data.csv"
+
+# Check if files exist, otherwise generate simulated data for reproducibility
+if (file.exists(patient_file)) {
+  df <- read.csv(patient_file, stringsAsFactors = FALSE)
+} else {
+  message("⚠️ Input file not found. Generating simulated patient data...")
+  set.seed(123)
+  df <- data.frame(
+    ID = 1:150,
+    Research_Center = sample(paste("Hospital", LETTERS[1:10]), 150, replace = T),
+    Age = rnorm(150, 45, 15),
+    Gender = sample(c("Male", "Female"), 150, replace = T),
+    Cause_of_Injury = sample(c("Fire", "Scald", "Electric", "Chemical"), 150, replace = T),
+    Outcome = sample(c("Healed", "Ongoing"), 150, replace = T)
+  )
+}
+
+# Data cleaning
+dat <- df %>%
+  mutate(
+    Hospital = Research_Center,
+    Cause = ifelse(is.na(Cause_of_Injury) | Cause_of_Injury == "", "Missing", Cause_of_Injury)
+  )
+
+head(dat)
+```
+
+```{r}
+# 1. Prepare Data
+cn_states <- ne_states(country = "china", returnclass = "sf") %>% select(name_en, geometry)
+tw <- ne_countries(scale = "medium", returnclass = "sf") %>% 
+  filter(admin == "Taiwan") %>% select(name_en = admin, geometry)
+china_all <- bind_rows(cn_states, tw)
+
+# Standardize Province Names
+dict <- tibble::tribble(
+  ~name_en, ~Province,
+  "Beijing", "Beijing", "Shanghai", "Shanghai", "Guangdong", "Guangdong",
+  "Hubei", "Hubei", "Sichuan", "Sichuan", "Hunan", "Hunan", "Zhejiang", "Zhejiang",
+  "Jiangsu", "Jiangsu", "Shandong", "Shandong", "Henan", "Henan", "Hebei", "Hebei",
+  "Anhui", "Anhui", "Fujian", "Fujian", "Jiangxi", "Jiangxi", "Guangxi", "Guangxi",
+  "Chongqing", "Chongqing", "Yunnan", "Yunnan", "Tianjin", "Tianjin", "Shanxi", "Shanxi",
+  "Liaoning", "Liaoning", "Heilongjiang", "Heilongjiang", "Jilin", "Jilin", "Guizhou", "Guizhou",
+  "Shaanxi", "Shaanxi", "Gansu", "Gansu", "Qinghai", "Qinghai", "Ningxia Hui", "Ningxia",
+  "Xinjiang Uygur", "Xinjiang", "Inner Mongolia", "Inner Mongolia", "Tibet", "Tibet",
+  "Hainan", "Hainan", "Taiwan", "Taiwan"
+)
+
+map_df <- china_all %>%
+  left_join(dict, by = "name_en") %>%
+  left_join(prov_count, by = "Province") %>%
+  mutate(n_patient = coalesce(n_patient, 0L), has_case = n_patient > 0)
+
+if (is.na(st_crs(map_df))) st_crs(map_df) <- 4326 else map_df <- st_transform(map_df, 4326)
+
+# Calculate Centroids
+centers <- sf::st_point_on_surface(map_df) %>%
+  cbind(sf::st_coordinates(.)) %>%
+  sf::st_drop_geometry() %>%
+  select(Province, n_patient, has_case, X, Y) %>%
+  filter(n_patient > 0)
+
+# 2. Process Nine-Dash Line (Remove Coastlines)
+if (file.exists("BOUNT_line.shp") && file.exists("BOUNT_poly.shp")) {
+  standard_line <- st_read("BOUNT_line.shp", quiet = TRUE)
+  standard_poly <- st_read("BOUNT_poly.shp", quiet = TRUE)
+  
+  if (is.na(st_crs(standard_line))) st_crs(standard_line) <- 4326 else standard_line <- st_transform(standard_line, 4326)
+  if (is.na(st_crs(standard_poly))) st_crs(standard_poly) <- 4326 else standard_poly <- st_transform(standard_poly, 4326)
+  
+  # Crop to South China Sea
+  south_sea_box <- st_bbox(c(xmin = 105, xmax = 125, ymin = 3, ymax = 26), crs = st_crs(standard_line))
+  lines_in_box <- st_crop(standard_line, south_sea_box)
+  
+  # Filter: Keep lines NOT touching land
+  is_touching_land <- lengths(st_intersects(lines_in_box, standard_poly)) > 0
+  nine_dash_clean <- lines_in_box[!is_touching_land, ]
+  
+  has_files <- TRUE
+} else {
+  message("⚠️ Standard map files (BOUNT) not found. Skipping Nine-Dash Line processing.")
+  has_files <- FALSE
+}
+
+# 3. Plot
+p_main <- ggplot() +
+  geom_sf(data = map_df, aes(fill = has_case), color = NA, size = 0) +
+  scale_fill_manual(values = c(`FALSE` = "#F9EAD6", `TRUE` = "#F4B183"),
+                    labels = c("FALSE" = "No enrollment", "TRUE" = "With enrollment"), name = "") +
+  geom_point(data = centers, aes(X, Y, size = n_patient),
+             shape = 21, stroke = 0.3, color = "#B35A3E", fill = "#F6C0AE", alpha = 0.8) +
+  geom_text(data = centers, aes(X, Y, label = n_patient), size = 3, fontface = "bold", vjust = 0.5) +
+  scale_size_continuous(name = "Patients", range = c(3, 10)) +
+  coord_sf(ylim = c(18, 54), xlim = c(73, 135), expand = FALSE) +
+  theme_void() +
+  theme(legend.position = c(0.15, 0.2), plot.title = element_text(hjust = 0.5, face = "bold", size = 16)) +
+  labs(title = "Enrollment Map")
+
+# Inset Map
+p_mini <- NULL
+if (has_files) {
+  world_map <- ne_countries(scale = "medium", returnclass = "sf")
+  
+  p_mini <- ggplot() +
+    geom_sf(data = world_map, fill = "#F0F0F0", color = NA) +
+    geom_sf(data = map_df, aes(fill = has_case), color = NA, show.legend = FALSE) +
+    scale_fill_manual(values = c(`FALSE` = "#F9EAD6", `TRUE` = "#F4B183")) +
+    geom_sf(data = nine_dash_clean, color = "black", size = 0.6) +
+    coord_sf(xlim = c(105, 125), ylim = c(3, 26), expand = FALSE) +
+    theme_void() +
+    theme(panel.border = element_rect(color = "black", fill = NA, size = 0.5),
+          panel.background = element_rect(fill = "white"))
+}
+
+# Combine
+if (!is.null(p_mini)) {
+  final_map <- ggdraw() +
+    draw_plot(p_main) +
+    draw_plot(p_mini, x = 0.77, y = 0.02, width = 0.22, height = 0.32)
+} else {
+  final_map <- p_main
+}
+
+print(final_map)
+ggsave("Figure2_Enrollment_Map.pdf", final_map, width = 9, height = 6, device = cairo_pdf)
+```
+
+
+```{r}
+# Prepare data
+bar_dat <- dat %>% count(Hospital, Cause, name = "n")
+total_dat <- bar_dat %>% group_by(Hospital) %>% summarise(n = sum(n), .groups = "drop")
+
+# Reorder hospitals by total count
+ord_hosp <- total_dat %>% arrange(desc(n)) %>% pull(Hospital)
+bar_dat$Hospital  <- factor(bar_dat$Hospital, levels = rev(ord_hosp))
+total_dat$Hospital <- factor(total_dat$Hospital, levels = rev(ord_hosp))
+
+# Color palette
+injury_lvls <- unique(bar_dat$Cause)
+pal <- setNames(brewer.pal(max(3, length(injury_lvls)), "Pastel1")[seq_along(injury_lvls)], injury_lvls)
+maxN <- max(total_dat$n)
+
+# Plot
+p_bar <- ggplot(bar_dat, aes(x = Hospital, y = n, fill = Cause)) +
+  geom_col(width = 0.75, color = NA) +
+  coord_flip() +
+  scale_fill_manual(values = pal, drop = FALSE) +
+  scale_y_continuous(breaks = pretty_breaks(), expand = expansion(mult = c(0, .08))) +
+  labs(x = "Hospital", y = "Number of patients", fill = "Cause of injury") +
+  theme(panel.grid.major.y = element_blank(),
+        legend.position = "right",
+        plot.margin = margin(10, 12, 10, 10)) +
+  geom_text(data = total_dat, aes(x = Hospital, y = n, label = n),
+            inherit.aes = FALSE, hjust = -0.2, size = 3.8)
+
+print(p_bar)
+
+# Save to PDF
+ggsave("Figure2_Hospital_Enrollment.pdf", p_bar, width = 8, height = 4, device = cairo_pdf)
+```
+
+```{r}
+num_vars <- df %>% select(where(is.numeric)) %>% names()
+num_vars <- setdiff(num_vars, "ID") # Exclude ID
+
+plot_density <- function(data, var, color) {
+  x <- na.omit(data[[var]])
+  if (length(x) < 5) return(NULL)
+  
+  stats <- list(mean = mean(x), sd = sd(x), median = median(x), 
+                min = min(x), max = max(x))
+  
+  label_txt <- sprintf("Mean: %.2f\nSD: %.2f\nMedian: %.2f\nRange: [%.1f, %.1f]", 
+                       stats$mean, stats$sd, stats$median, stats$min, stats$max)
+  
+  ggplot(data, aes(x = .data[[var]])) +
+    geom_density(fill = color, color = "black", alpha = 0.7) +
+    geom_vline(xintercept = stats$mean, color = "#0093FF", linetype = "dashed") +
+    annotate("text", x = Inf, y = Inf, label = label_txt, hjust = 1.1, vjust = 1.1, size = 3) +
+    labs(title = var, x = var, y = "Density") +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+}
+
+# Generate plots
+if (length(num_vars) > 0) {
+  pal <- colorRampPalette(brewer.pal(9, "Pastel1"))(length(num_vars))
+  cairo_pdf("Figure2_Continuous_Density.pdf", width = 3, height = 2.5)
+  for (i in seq_along(num_vars)) {
+    p <- plot_density(df, num_vars[i], pal[i])
+    if (!is.null(p)) print(p)
+  }
+  dev.off()
+  message("Continuous plots saved to PDF.")
+}
+```
+
+```{r}
+# Identify categorical columns (2-20 levels)
+max_levels <- 20
+is_cat <- vapply(df, function(x) {
+  (is.character(x) || is.factor(x) || is.logical(x)) &&
+    n_distinct(x, na.rm = TRUE) >= 2 &&
+    n_distinct(x, na.rm = TRUE) <= max_levels
+}, logical(1))
+
+cat_cols <- names(df)[is_cat]
+# Exclude Hospital names/IDs if they appear
+cat_cols <- setdiff(cat_cols, c("Research_Center", "Hospital", "ID"))
+
+# Donut chart function
+make_donut <- function(vec, var_name) {
+  x <- vec
+  if (is.logical(x)) x <- ifelse(is.na(x), NA, ifelse(x, "Yes", "No"))
+  if (is.character(x)) x[is.na(x) | trimws(x) == ""] <- "Missing"
+  else x[is.na(x)] <- "Missing"
+  
+  pie_dat <- as.data.frame(table(x)) %>%
+    rename(Level = x, n = Freq) %>%
+    mutate(pct = n/sum(n), 
+           pct_lab = percent(pct, accuracy = 0.1),
+           cum = cumsum(pct), mid = cum - pct/2)
+  
+  nlev <- nrow(pie_dat)
+  base_pal <- brewer.pal(9, "Pastel1")
+  pal <- if(nlev <= 9) base_pal[1:nlev] else colorRampPalette(base_pal)(nlev)
+  names(pal) <- pie_dat$Level
+  
+  p <- ggplot(pie_dat, aes(x = 2, y = pct, fill = Level)) +
+    geom_col(width = 0.7, color = "white") +
+    coord_polar(theta = "y") +
+    xlim(0.5, 2.6) +
+    scale_fill_manual(values = pal) +
+    theme_void(base_size = 14) +
+    theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) +
+    labs(title = var_name) +
+    geom_text(aes(x = 1.5, y = mid, 
+                  label = paste0(Level, " ", pct_lab), 
+                  angle = ifelse(90-360*mid < -90, 90-360*mid+180, 90-360*mid),
+                  hjust = ifelse(90-360*mid < -90, 1, 0)),
+              size = 3.5)
+  return(p)
+}
+
+# Generate and save plots
+if (length(cat_cols) > 0) {
+  cairo_pdf("Figure2_Categorical_Donuts.pdf", width = 6.5, height = 5.5)
+  for (v in cat_cols) {
+    print(make_donut(df[[v]], v))
+  }
+  dev.off()
+  message("Categorical plots saved to PDF.")
+}
+```
+
+```{r}
+# Load or simulate data
+if (file.exists(sampling_file)) {
+  samp_df <- read.csv(sampling_file)
+} else {
+  samp_df <- data.frame(
+    tp = rep(c("1-2dpb", "7dpb", "14dpb", "28dpb", "3mpb"), each = 3),
+    type = rep(c("Skin swab", "Oral swab", "Stool/Anal swab"), 5),
+    n = sample(50:150, 15, replace = TRUE)
+  )
+}
+
+# Order factors
+tp_levels <- unique(samp_df$tp) # Or define specific order manually
+samp_df <- samp_df %>% 
+  mutate(tp = factor(tp, levels = tp_levels),
+         type = factor(type, levels = c("Skin swab", "Oral swab", "Stool/Anal swab")))
+
+# Palette
+pal_samp <- c("Skin swab" = "#F4B3AE", "Oral swab" = "#A8D5BA", "Stool/Anal swab" = "#B8C7E6")
+
+p_samp <- ggplot(samp_df, aes(x = tp, y = n, fill = type)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.72) +
+  scale_fill_manual(values = pal_samp, name = "Sample type") +
+  labs(title = "Progress of biological sampling", x = "Time point", y = "Count") +
+  theme_bw() +
+  theme(panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = 30, hjust = 1))+
+    theme(
+# 原有的网格和X轴角度设置
+    panel.grid.major.x = element_blank(),
+    
+    # 字体设置 (Arial / sans)
+    # X轴标题
+    axis.title.x = element_text(size = 14, family = "sans"), 
+    # Y轴标题
+    axis.title.y = element_text(size = 14, family = "sans"),
+    # 图表标题
+    plot.title   = element_text(size = 20, hjust = 0.5, family = "sans"),
+    # 刻度标签
+    axis.text.x  = element_text(size = 14, color = "black", family = "sans", angle = 30, hjust = 1), # 合并了之前的 angle 设置
+    axis.text.y  = element_text(size = 14, color = "black", family = "sans"),
+
+    # 图例标题 ("Sample type")
+    legend.title = element_text(size = 14,  family = "sans"),
+    # 图例文字 ("Skin swab" 等)
+    legend.text  = element_text(size = 12, family = "sans")    
+    )
+
+print(p_samp)
+ggsave("Figure2_Sampling_Progress.pdf", p_samp, width = 10, height = 4, device = cairo_pdf)
+```
+
